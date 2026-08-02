@@ -38,7 +38,11 @@ async function processPrintJob(jobData) {
 
   try {
     // Download PDF file
-    const urlToUse = downloadUrl || pdfUrl;
+    let urlToUse = downloadUrl || pdfUrl;
+    if (urlToUse && !urlToUse.startsWith('http')) {
+      const serverRoot = (currentConfig.backendUrl || 'https://saas-backend-production-5c3e.up.railway.app').replace(/\/api\/v1\/?$/, '');
+      urlToUse = `${serverRoot}${urlToUse.startsWith('/') ? '' : '/'}${urlToUse}`;
+    }
     console.log(`[Download] Downloading PDF from ${urlToUse}...`);
 
     const response = await axios({

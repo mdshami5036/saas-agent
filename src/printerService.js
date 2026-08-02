@@ -29,9 +29,13 @@ async function getAvailablePrinters() {
 
 async function checkPrinterOnlineStatus(printerName) {
   if (process.platform !== 'win32') return true;
+  if (!printerName) return true;
+  if (printerName.toLowerCase().includes('pdf') || printerName.toLowerCase().includes('xps') || printerName.toLowerCase().includes('onenote')) {
+    return true;
+  }
 
   return new Promise((resolve) => {
-    const cmd = `powershell -Command "Get-Printer -Name '${printerName || '*'}' | Select-Object PrinterStatus, WorkOffline | ConvertTo-Json"`;
+    const cmd = `powershell -Command "Get-Printer -Name '${printerName}' | Select-Object PrinterStatus, WorkOffline | ConvertTo-Json"`;
     exec(cmd, (error, stdout) => {
       if (error || !stdout) return resolve(true); // fallback to true
       try {
