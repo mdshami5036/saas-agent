@@ -64,10 +64,7 @@ async function processPrintJob(jobData) {
     fs.writeFileSync(tempFilePath, Buffer.from(response.data));
     console.log(`[Download] PDF saved to temporary path: ${tempFilePath}`);
 
-    // Auto-detect best available printer
-    // Priority: 1) Real physical printer 2) Configured printer 3) Windows default
-    let printerToUse = currentConfig.selectedPrinter || null;
-
+    // Auto-detect best available PHYSICAL printer
     const allPrinters = await getAvailablePrinters();
     const VIRTUAL_PRINTERS = ['microsoft print to pdf', 'microsoft xps', 'onenote', 'fax', 'adobe pdf', 'bullzip', 'dopdf', 'cutepdf'];
     const physicalPrinters = allPrinters.filter(p => {
@@ -75,31 +72,62 @@ async function processPrintJob(jobData) {
       return !VIRTUAL_PRINTERS.some(v => name.includes(v));
     });
 
-    if (physicalPrinters.length > 0) {
-      // Use default physical printer if available, else first physical printer
-      const defaultPhysical = physicalPrinters.find(p => p.isDefault);
-      printerToUse = defaultPhysical ? defaultPhysical.name : physicalPrinters[0].name;
-      console.log(`[Printer Auto-Detect] Physical printer found: "${printerToUse}"`);
-    } else if (!printerToUse) {
-      // No physical printer, use system default
-      const defaultPrinter = allPrinters.find(p => p.isDefault);
-      printerToUse = defaultPrinter ? defaultPrinter.name : null;
-      console.log(`[Printer Auto-Detect] Using system default: "${printerToUse}"`);
+    if (physicalPrinters.length === 0) {
+      // ======================================================
+      // NO PHYSICAL PRINTER CONNECTED → Show Save Dialog
+      // ======================================================
+      console.log(`[Printer Auto-Detect] No physical printer connected. Showing Save Dialog...`);
+      reportJobStatus(jobId, 'PRINTER_OFFLINE', 'No physical printer connected');
+      showDesktopNotification('Printer Nahi Mila!', 'PDF save karne ki location choose karein...');
+
+      const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
+      const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
+      const dialogScript = path.join(__dirname, '..', 'save_dialog.ps1');
+
+      try {
+        const savePath = execSync(
+          `powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "${dialogScript}" -FileName "${suggestedName}"`,
+          { encoding: 'utf8', timeout: 120000 }
+        ).trim();
+
+        if (savePath && savePath !== 'CANCELLED' && savePath.length > 3) {
+          fs.copyFileSync(tempFilePath, savePath);
+          console.log(`[PDF Saved] User selected: ${savePath}`);
+          showDesktopNotification('PDF Save Ho Gayi! ✅', `Saved: ${path.basename(savePath)}`);
+          reportJobStatus(jobId, 'COMPLETED');
+        } else {
+          console.log(`[PDF Save] User cancelled.`);
+          showDesktopNotification('PDF Save Cancel Hua', 'Aapne save dialog cancel kar diya.');
+        }
+      } catch (dialogErr) {
+        console.warn('[Save Dialog Error]:', dialogErr.message);
+        // Fallback: auto-save to Desktop
+        const fallbackPath = path.join(os.homedir(), 'Desktop', suggestedName);
+        if (fs.existsSync(tempFilePath)) {
+          fs.copyFileSync(tempFilePath, fallbackPath);
+          showDesktopNotification('PDF Desktop Pe Saved!', suggestedName);
+          reportJobStatus(jobId, 'COMPLETED');
+        }
+      }
+
     } else {
-      console.log(`[Printer Auto-Detect] No physical printer found, using configured: "${printerToUse}"`);
+      // ======================================================
+      // PHYSICAL PRINTER FOUND → Print directly
+      // ======================================================
+      const defaultPhysical = physicalPrinters.find(p => p.isDefault);
+      const printerToUse = defaultPhysical ? defaultPhysical.name : physicalPrinters[0].name;
+      console.log(`[Printer Auto-Detect] Physical printer found: "${printerToUse}"`);
+
+      await printPdfSilent(tempFilePath, {
+        printerName: printerToUse,
+        pages: pagesToPrint,
+        copies: copies || 1,
+        colorMode: colorMode || 'BW',
+      });
+
+      reportJobStatus(jobId, 'COMPLETED');
+      showDesktopNotification('Print Ho Gaya! ✅', `Printed on "${printerToUse}"`);
     }
-
-    // Print PDF silently
-    await printPdfSilent(tempFilePath, {
-      printerName: printerToUse,
-      pages: pagesToPrint,
-      copies: copies || 1,
-      colorMode: colorMode || 'BW',
-    });
-
-    // Report success
-    reportJobStatus(jobId, 'COMPLETED');
-    showDesktopNotification('Print Completed Successfully!', `Printed on ${printerToUse || 'Default Printer'}`);
 
   } catch (err) {
     console.error('[Job Execution Error]:', err.message);
