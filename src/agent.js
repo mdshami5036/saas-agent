@@ -157,6 +157,21 @@ async function startAgentEngine(config) {
       printers,
       selectedPrinter: config.selectedPrinter,
     });
+
+    // Auto-close terminal window and hand over to background hidden process
+    const isBackgroundRun = process.argv.includes('--background') || process.argv.includes('--silent');
+    if (!isBackgroundRun && process.platform === 'win32') {
+      try {
+        const exePath = process.execPath;
+        const cmd = `powershell -Command "Start-Process '${exePath}' -WindowStyle Hidden -ArgumentList '--background'"`;
+        require('child_process').exec(cmd);
+        setTimeout(() => {
+          process.exit(0);
+        }, 500);
+      } catch (e) {
+        // Fallback
+      }
+    }
   });
 
   socket.on('job:new_print', (data) => {
