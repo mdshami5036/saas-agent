@@ -189,9 +189,20 @@ async function startAgentEngine(config) {
 function init() {
   const config = loadConfig();
 
-  // Check if force reconfiguration flag or unconfigured
-  const isSilentRun = process.argv.includes('--silent');
   const isForceConfig = process.argv.includes('--configure');
+  const isBackgroundRun = process.argv.includes('--background') || process.argv.includes('--silent');
+
+  // If already configured and launched by user click, switch immediately to hidden background execution
+  if (!isBackgroundRun && !isForceConfig && config.isConfigured && config.agentToken && process.platform === 'win32') {
+    try {
+      const exePath = process.execPath;
+      const cmd = `powershell -Command "Start-Process '${exePath}' -WindowStyle Hidden -ArgumentList '--background'"`;
+      require('child_process').exec(cmd);
+      process.exit(0);
+    } catch (e) {
+      // Fallback
+    }
+  }
 
   if (isForceConfig || !config.isConfigured || !config.agentToken) {
     console.log('[Setup] Launching initial configuration GUI window...');
