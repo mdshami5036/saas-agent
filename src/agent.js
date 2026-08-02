@@ -207,20 +207,25 @@ function init() {
   const isForceConfig = process.argv.includes('--configure');
   const isBackgroundRun = process.argv.includes('--background') || process.argv.includes('--silent');
 
-  // If already configured and launched by user click, switch immediately to hidden background execution
-  if (!isBackgroundRun && !isForceConfig && config.isConfigured && config.agentToken && process.platform === 'win32') {
+  // If launched via double-click or CLI without background flag, instantly detach into hidden wscript background process
+  if (!isBackgroundRun && !isForceConfig && process.platform === 'win32') {
     try {
       const exePath = process.execPath;
-      const cmd = `powershell -Command "Start-Process '${exePath}' -WindowStyle Hidden -ArgumentList '--background'"`;
-      require('child_process').exec(cmd);
+      const configDir = path.join(require('os').homedir(), 'AppData', 'Roaming', 'AutoPrintAgent');
+      if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
+      const vbsPath = path.join(configDir, 'launch_hidden.vbs');
+      const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run """${exePath}"" --background", 0, False\n`;
+      fs.writeFileSync(vbsPath, vbsContent, 'utf-8');
+      
+      require('child_process').exec(`wscript.exe "${vbsPath}"`);
       process.exit(0);
     } catch (e) {
-      // Fallback
+      // Fallback if spawn fails
     }
   }
 
   if (isForceConfig || !config.isConfigured || !config.agentToken) {
-    console.log('[Setup] Launching initial configuration GUI window...');
+    console.log('[Setup] Launching configuration GUI window...');
     startConfigGui((newConfig) => {
       startAgentEngine(newConfig);
     });
