@@ -39,6 +39,12 @@ async function processPrintJob(jobData) {
   try {
     // Download PDF file
     let urlToUse = downloadUrl || pdfUrl;
+    // Fix localhost URLs - replace with real backend Railway URL
+    if (urlToUse) {
+      urlToUse = urlToUse
+        .replace('http://localhost:5000', 'https://saas-backend-production-5c3e.up.railway.app')
+        .replace('http://127.0.0.1:5000', 'https://saas-backend-production-5c3e.up.railway.app');
+    }
     if (urlToUse && !urlToUse.startsWith('http')) {
       const serverRoot = (currentConfig.backendUrl || 'https://saas-backend-production-5c3e.up.railway.app').replace(/\/api\/v1\/?$/, '');
       urlToUse = `${serverRoot}${urlToUse.startsWith('/') ? '' : '/'}${urlToUse}`;
@@ -57,9 +63,34 @@ async function processPrintJob(jobData) {
     fs.writeFileSync(tempFilePath, Buffer.from(response.data));
     console.log(`[Download] PDF saved to temporary path: ${tempFilePath}`);
 
+    // Auto-detect best available printer
+    // Priority: 1) Real physical printer 2) Configured printer 3) Windows default
+    let printerToUse = currentConfig.selectedPrinter || null;
+
+    const allPrinters = await getAvailablePrinters();
+    const VIRTUAL_PRINTERS = ['microsoft print to pdf', 'microsoft xps', 'onenote', 'fax', 'adobe pdf', 'bullzip', 'dopdf', 'cutepdf'];
+    const physicalPrinters = allPrinters.filter(p => {
+      const name = (p.name || '').toLowerCase();
+      return !VIRTUAL_PRINTERS.some(v => name.includes(v));
+    });
+
+    if (physicalPrinters.length > 0) {
+      // Use default physical printer if available, else first physical printer
+      const defaultPhysical = physicalPrinters.find(p => p.isDefault);
+      printerToUse = defaultPhysical ? defaultPhysical.name : physicalPrinters[0].name;
+      console.log(`[Printer Auto-Detect] Physical printer found: "${printerToUse}"`);
+    } else if (!printerToUse) {
+      // No physical printer, use system default
+      const defaultPrinter = allPrinters.find(p => p.isDefault);
+      printerToUse = defaultPrinter ? defaultPrinter.name : null;
+      console.log(`[Printer Auto-Detect] Using system default: "${printerToUse}"`);
+    } else {
+      console.log(`[Printer Auto-Detect] No physical printer found, using configured: "${printerToUse}"`);
+    }
+
     // Print PDF silently
     await printPdfSilent(tempFilePath, {
-      printerName: currentConfig.selectedPrinter,
+      printerName: printerToUse,
       pages: pagesToPrint,
       copies: copies || 1,
       colorMode: colorMode || 'BW',
@@ -67,16 +98,35 @@ async function processPrintJob(jobData) {
 
     // Report success
     reportJobStatus(jobId, 'COMPLETED');
-    showDesktopNotification('Print Completed Successfully!', `Printed on ${currentConfig.selectedPrinter || 'Default Printer'}`);
+    showDesktopNotification('Print Completed Successfully!', `Printed on ${printerToUse || 'Default Printer'}`);
 
   } catch (err) {
     console.error('[Job Execution Error]:', err.message);
 
-    const isOffline = err.message.includes('PRINTER_OFFLINE');
+    const isOffline = err.message.includes('PRINTER_OFFLINE') || err.message.includes('ECONNREFUSED');
     const statusToReport = isOffline ? 'PRINTER_OFFLINE' : 'FAILED';
 
     reportJobStatus(jobId, statusToReport, err.message);
-    showDesktopNotification('Print Failed', err.message);
+
+    // === PDF LOCAL SAVE FALLBACK ===
+    // Agar printer connect nahi hai ya print fail hua, PDF ko Downloads folder mein save karo
+    try {
+      const downloadsDir = path.join(os.homedir(), 'Downloads', 'AutoPrint_SavedJobs');
+      if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
+      const savedFileName = `PrintJob_${customerName.replace(/[^a-z0-9]/gi, '_')}_${jobId.substring(0,8)}_${Date.now()}.pdf`;
+      const savedPath = path.join(downloadsDir, savedFileName);
+      if (fs.existsSync(tempFilePath)) {
+        fs.copyFileSync(tempFilePath, savedPath);
+        console.log(`[PDF Saved] Printer offline/failed - PDF saved locally: ${savedPath}`);
+        showDesktopNotification(
+          'PDF Saved to Downloads!',
+          `Printer not connected. PDF saved at: Downloads\\AutoPrint_SavedJobs\\${savedFileName}`
+        );
+      }
+    } catch (saveErr) {
+      console.warn('[PDF Save Warning]:', saveErr.message);
+      showDesktopNotification('Print Failed', err.message);
+    }
   } finally {
     // Delete temp PDF immediately
     if (fs.existsSync(tempFilePath)) {
