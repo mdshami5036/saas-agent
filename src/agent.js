@@ -3,6 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 const { loadConfig, saveConfig } = require('./configManager');
 const { getHardwareFingerprint } = require('./hardwareFingerprint');
 const { enableAutoStart } = require('./autoStartService');
@@ -105,27 +106,47 @@ async function processPrintJob(jobData) {
 
     const isOffline = err.message.includes('PRINTER_OFFLINE') || err.message.includes('ECONNREFUSED');
     const statusToReport = isOffline ? 'PRINTER_OFFLINE' : 'FAILED';
-
     reportJobStatus(jobId, statusToReport, err.message);
 
-    // === PDF LOCAL SAVE FALLBACK ===
-    // Agar printer connect nahi hai ya print fail hua, PDF ko Downloads folder mein save karo
-    try {
-      const downloadsDir = path.join(os.homedir(), 'Downloads', 'AutoPrint_SavedJobs');
-      if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
-      const savedFileName = `PrintJob_${customerName.replace(/[^a-z0-9]/gi, '_')}_${jobId.substring(0,8)}_${Date.now()}.pdf`;
-      const savedPath = path.join(downloadsDir, savedFileName);
-      if (fs.existsSync(tempFilePath)) {
-        fs.copyFileSync(tempFilePath, savedPath);
-        console.log(`[PDF Saved] Printer offline/failed - PDF saved locally: ${savedPath}`);
-        showDesktopNotification(
-          'PDF Saved to Downloads!',
-          `Printer not connected. PDF saved at: Downloads\\AutoPrint_SavedJobs\\${savedFileName}`
-        );
+    // === WINDOWS SAVE DIALOG POPUP ===
+    // Printer nahi mila → User se puchho PDF kahan save karein
+    if (fs.existsSync(tempFilePath)) {
+      try {
+        const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
+        const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
+        const dialogScript = path.join(__dirname, '..', 'save_dialog.ps1');
+
+        console.log(`[Save Dialog] Printer not found. Showing save dialog to user...`);
+        showDesktopNotification('Printer Nahi Mila!', 'Popup aya hai - PDF save karne ki location choose karein');
+
+        // Run PowerShell Save File Dialog and get user chosen path
+        const savePath = execSync(
+          `powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "${dialogScript}" -FileName "${suggestedName}" -CustomerName "${safeCustomer}" -JobId "${jobId}"`,
+          { encoding: 'utf8', timeout: 120000 }
+        ).trim();
+
+        if (savePath && savePath !== 'CANCELLED' && savePath.length > 0) {
+          fs.copyFileSync(tempFilePath, savePath);
+          console.log(`[PDF Saved] User selected path: ${savePath}`);
+          showDesktopNotification('PDF Save Ho Gayi! ✅', `Saved: ${path.basename(savePath)}`);
+          reportJobStatus(jobId, 'COMPLETED');
+        } else {
+          console.log(`[PDF Save] User cancelled the save dialog.`);
+          showDesktopNotification('PDF Save Cancel', 'Aapne save dialog cancel kar diya.');
+        }
+      } catch (dialogErr) {
+        console.warn('[Save Dialog Error]:', dialogErr.message);
+        // Fallback: auto-save to Desktop
+        try {
+          const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
+          const fallbackPath = path.join(os.homedir(), 'Desktop', `PrintJob_${safeCustomer}_${jobId.substring(0,8)}.pdf`);
+          fs.copyFileSync(tempFilePath, fallbackPath);
+          console.log(`[PDF Fallback] Saved to Desktop: ${fallbackPath}`);
+          showDesktopNotification('PDF Desktop Pe Saved!', `PrintJob_${safeCustomer}_${jobId.substring(0,8)}.pdf`);
+        } catch (fbErr) {
+          console.error('[PDF Fallback Error]:', fbErr.message);
+        }
       }
-    } catch (saveErr) {
-      console.warn('[PDF Save Warning]:', saveErr.message);
-      showDesktopNotification('Print Failed', err.message);
     }
   } finally {
     // Delete temp PDF immediately
