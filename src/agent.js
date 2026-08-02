@@ -167,8 +167,19 @@ async function startAgentEngine(config) {
     console.warn(`[Socket.IO] Disconnected from backend. Reconnecting / HTTP polling fallback active.`);
   });
 
+  let guiOpenedOnErr = false;
   socket.on('connect_error', (err) => {
     console.warn('[Socket.IO Connection Error]:', err.message);
+    if (err.message.includes('Invalid or inactive tenant') && !guiOpenedOnErr) {
+      guiOpenedOnErr = true;
+      console.log('[Setup] Token invalid or expired. Launching configuration GUI window...');
+      showDesktopNotification('Agent Setup Needed', 'Invalid Token. Please enter your new Agent Token.');
+      startConfigGui((newConfig) => {
+        guiOpenedOnErr = false;
+        if (socket) socket.close();
+        startAgentEngine(newConfig);
+      });
+    }
   });
 
   // Start HTTP Long-Polling Fallback
