@@ -10,6 +10,7 @@ const { enableAutoStart } = require('./autoStartService');
 const { getAvailablePrinters, printPdfSilent } = require('./printerService');
 const { startConfigGui } = require('./gui');
 const { showDesktopNotification } = require('./systemTray');
+const { extractSelectedPages } = require('./pdfSlicer');
 
 let socket = null;
 let currentConfig = null;
@@ -61,8 +62,12 @@ async function processPrintJob(jobData) {
       },
     });
 
-    fs.writeFileSync(tempFilePath, Buffer.from(response.data));
-    console.log(`[Download] PDF saved to temporary path: ${tempFilePath}`);
+    // Extract exact pages requested by customer (e.g., page 1 of 6)
+    const rawBuffer = Buffer.from(response.data);
+    const finalPdfBuffer = await extractSelectedPages(rawBuffer, pagesToPrint);
+
+    fs.writeFileSync(tempFilePath, finalPdfBuffer);
+    console.log(`[Download] Processed PDF saved to temporary path: ${tempFilePath}`);
 
     // Auto-detect best available PHYSICAL printer
     const allPrinters = await getAvailablePrinters();
