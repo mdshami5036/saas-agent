@@ -110,59 +110,20 @@ async function processPrintJob(jobData) {
     // Update status to PRINTING
     reportJobStatus(jobId, 'PRINTING');
 
-    // Auto-detect best available PHYSICAL printer
-    const allPrinters = await getAvailablePrinters();
-    const VIRTUAL_PRINTERS = ['microsoft print to pdf', 'microsoft xps', 'onenote', 'fax', 'adobe pdf', 'bullzip', 'dopdf', 'cutepdf'];
-    const physicalPrinters = allPrinters.filter(p => {
-      const name = (p.name || '').toLowerCase();
-      return !VIRTUAL_PRINTERS.some(v => name.includes(v));
+    // Directly send Silent Print Command to Windows Printer (No checking or filtering)
+    const targetPrinter = currentConfig ? currentConfig.selectedPrinter : null;
+
+    console.log(`[Direct Silent Print] Sending print command for Job #${jobId} (${colorMode === 'COLOR' ? 'COLOR' : 'B&W'}, A4, Copies: ${copies || 1})...`);
+
+    await printPdfSilent(tempFilePath, {
+      printerName: targetPrinter,
+      pages: pagesToPrint,
+      copies: copies || 1,
+      colorMode: colorMode || 'BW',
     });
 
-    if (physicalPrinters.length === 0) {
-      // ======================================================
-      // NO PHYSICAL PRINTER CONNECTED → Instant Save to Laptop
-      // ======================================================
-      console.log(`[Printer Auto-Detect] No physical printer connected. Auto-saving PDF to Laptop...`);
-
-      const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
-      const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
-      const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
-      
-      if (!fs.existsSync(desktopJobsDir)) {
-        fs.mkdirSync(desktopJobsDir, { recursive: true });
-      }
-
-      const savedPath = path.join(desktopJobsDir, suggestedName);
-
-      // Save trimmed PDF file directly to Desktop\AutoPrint_SavedJobs
-      fs.copyFileSync(tempFilePath, savedPath);
-      console.log(`[PDF Saved] File saved to laptop: ${savedPath}`);
-
-      // Auto-open File Explorer highlighting the saved file
-      execAsync(`explorer.exe /select,"${savedPath}"`).catch(() => {});
-
-      // Report COMPLETED status to backend
-      reportJobStatus(jobId, 'COMPLETED');
-      showDesktopNotification('PDF Saved to Laptop! ✅', `Location: ${path.basename(savedPath)}`);
-
-    } else {
-      // ======================================================
-      // PHYSICAL PRINTER FOUND → Print directly
-      // ======================================================
-      const defaultPhysical = physicalPrinters.find(p => p.isDefault);
-      const printerToUse = defaultPhysical ? defaultPhysical.name : physicalPrinters[0].name;
-      console.log(`[Printer Auto-Detect] Physical printer found: "${printerToUse}"`);
-
-      await printPdfSilent(tempFilePath, {
-        printerName: printerToUse,
-        pages: pagesToPrint,
-        copies: copies || 1,
-        colorMode: colorMode || 'BW',
-      });
-
-      reportJobStatus(jobId, 'COMPLETED');
-      showDesktopNotification('Print Ho Gaya! ✅', `Printed on "${printerToUse}"`);
-    }
+    reportJobStatus(jobId, 'COMPLETED');
+    showDesktopNotification('Print Ho Gaya! ✅', `Command Sent (${colorMode === 'COLOR' ? 'COLOR' : 'B&W'}, A4)`);
 
   } catch (err) {
     console.error('[Job Execution Error]:', err.message);
