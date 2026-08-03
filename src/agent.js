@@ -263,7 +263,17 @@ async function startAgentEngine(config) {
       printers,
       selectedPrinter: config.selectedPrinter,
     });
+    socket.emit('agent:heartbeat', { selectedPrinter: config.selectedPrinter });
   });
+
+  // 15-Second Heartbeat loop to keep device ONLINE 24/7 without flickering
+  setInterval(() => {
+    if (socket && socket.connected) {
+      socket.emit('agent:heartbeat', {
+        selectedPrinter: config.selectedPrinter,
+      });
+    }
+  }, 15000);
 
   socket.on('job:new_print', (data) => {
     console.log(`[Job Dispatch Event Received] Job ID: ${data.jobId}`);
