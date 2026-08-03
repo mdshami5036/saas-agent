@@ -162,23 +162,31 @@ async function processPrintJob(jobData) {
   } catch (err) {
     console.error('[Job Execution Error]:', err.message);
 
-    const isOffline = err.message.includes('PRINTER_OFFLINE') || err.message.includes('ECONNREFUSED');
-    const statusToReport = isOffline ? 'PRINTER_OFFLINE' : 'FAILED';
-    reportJobStatus(jobId, statusToReport, err.message);
-
-    // Fallback: Save to Desktop\AutoPrint_SavedJobs if job processing failed midway
+    // Fallback: Save to Desktop\AutoPrint_SavedJobs if physical print or dialog failed
+    let savedFallback = false;
     try {
-      const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
-      const fallbackPath = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs', `PrintJob_${safeCustomer}_${jobId.substring(0,8)}.pdf`);
       if (fs.existsSync(tempFilePath)) {
-        const fallbackDir = path.dirname(fallbackPath);
-        if (!fs.existsSync(fallbackDir)) fs.mkdirSync(fallbackDir, { recursive: true });
+        const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
+        const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
+        if (!fs.existsSync(desktopJobsDir)) {
+          fs.mkdirSync(desktopJobsDir, { recursive: true });
+        }
+        const fallbackPath = path.join(desktopJobsDir, `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`);
         fs.copyFileSync(tempFilePath, fallbackPath);
-        showDesktopNotification('PDF Saved to Desktop!', `Saved at: ${path.basename(fallbackPath)}`);
+        console.log(`[PDF Saved to Desktop Fallback] Saved: ${fallbackPath}`);
+        execAsync(`explorer.exe /select,"${fallbackPath}"`).catch(() => {});
+        showDesktopNotification('PDF Saved to Laptop! ✅', `Location: ${path.basename(fallbackPath)}`);
         reportJobStatus(jobId, 'COMPLETED');
+        savedFallback = true;
       }
     } catch (fbErr) {
       console.error('[PDF Fallback Error]:', fbErr.message);
+    }
+
+    if (!savedFallback) {
+      const isOffline = err.message.includes('PRINTER_OFFLINE') || err.message.includes('ECONNREFUSED');
+      const statusToReport = isOffline ? 'PRINTER_OFFLINE' : 'FAILED';
+      reportJobStatus(jobId, statusToReport, err.message);
     }
   } finally {
     if (fs.existsSync(tempFilePath)) {
