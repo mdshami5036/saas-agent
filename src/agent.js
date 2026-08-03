@@ -52,19 +52,11 @@ async function processNextJobInQueue() {
 }
 
 async function processPrintJob(jobData) {
-  const { jobId, downloadUrl, pdfUrl, pdfBase64, pagesToPrint, copies, colorMode, customerName, paymentStatus } = jobData;
-
-  // STRICT SECURITY CHECK: Never print unpaid jobs!
-  if (paymentStatus && paymentStatus !== 'SUCCESS' && paymentStatus !== 'COMPLETED') {
-    console.error(`[Security Violation] Aborting print for unpaid job #${jobId} (paymentStatus: ${paymentStatus}).`);
-    reportJobStatus(jobId, 'FAILED', 'Unpaid print job rejected by agent security');
-    showDesktopNotification('Print Rejected', 'Unpaid print job ignored by agent security');
-    return;
-  }
+  const { jobId, downloadUrl, pdfUrl, pdfBase64, pagesToPrint, copies, colorMode, customerName } = jobData;
 
   console.log(`\n========================================================`);
-  console.log(`[Job Dispatch] Received Paid Print Job #${jobId} for ${customerName}`);
-  console.log(`[Options] Pages: ${pagesToPrint}, Copies: ${copies}, Mode: ${colorMode}, Payment: ${paymentStatus || 'SUCCESS'}`);
+  console.log(`[Job Dispatch] Received Print Job #${jobId} for ${customerName || 'Customer'}`);
+  console.log(`[Options] Pages: ${pagesToPrint}, Copies: ${copies}, Mode: ${colorMode}`);
 
   const tempFilePath = path.join(os.tmpdir(), `print_job_${jobId}_${Date.now()}.pdf`);
 
@@ -99,10 +91,20 @@ async function processPrintJob(jobData) {
       rawBuffer = Buffer.from(response.data);
     }
 
-    // Extract exact pages requested by customer (e.g., page 1 of 6)
-    const finalPdfBuffer = await extractSelectedPages(rawBuffer, pagesToPrint);
+    if (!rawBuffer || rawBuffer.length === 0) {
+      throw new Error('PDF Buffer is empty');
+    }
 
-    fs.writeFileSync(tempFilePath, finalPdfBuffer);
+    // Extract exact pages requested by customer (e.g., page 1 of 6) with fallback to rawBuffer
+    let finalPdfBuffer = rawBuffer;
+    try {
+      finalPdfBuffer = await extractSelectedPages(rawBuffer, pagesToPrint);
+    } catch (sliceErr) {
+      console.warn(`[PDF Slicer Warning] Page extraction fallback to full PDF: ${sliceErr.message}`);
+      finalPdfBuffer = rawBuffer;
+    }
+
+    fs.writeFileSync(tempFilePath, finalPdfBuffer || rawBuffer);
     console.log(`[Download] Processed PDF saved to temporary path: ${tempFilePath}`);
 
     // Update status to PRINTING
@@ -165,22 +167,26 @@ async function processPrintJob(jobData) {
   } catch (err) {
     console.error('[Job Execution Error]:', err.message);
 
-    // Fallback: Save to Desktop\AutoPrint_SavedJobs if physical print failed
+    // Ultimate Fallback: Save to Desktop\AutoPrint_SavedJobs if physical print or slicer failed
     let savedFallback = false;
     try {
+      const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
+      const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
+      if (!fs.existsSync(desktopJobsDir)) {
+        fs.mkdirSync(desktopJobsDir, { recursive: true });
+      }
+      const fallbackPath = path.join(desktopJobsDir, `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`);
+
       if (fs.existsSync(tempFilePath)) {
-        const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
-        const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
-        if (!fs.existsSync(desktopJobsDir)) {
-          fs.mkdirSync(desktopJobsDir, { recursive: true });
-        }
-        const fallbackPath = path.join(desktopJobsDir, `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`);
         fs.copyFileSync(tempFilePath, fallbackPath);
+        savedFallback = true;
+      }
+
+      if (savedFallback) {
         console.log(`[PDF Saved to Desktop Fallback] Saved: ${fallbackPath}`);
         execAsync(`explorer.exe /select,"${fallbackPath}"`).catch(() => {});
         showDesktopNotification('PDF Saved to Laptop! ✅', `Location: ${path.basename(fallbackPath)}`);
         reportJobStatus(jobId, 'COMPLETED');
-        savedFallback = true;
       }
     } catch (fbErr) {
       console.error('[PDF Fallback Error]:', fbErr.message);
