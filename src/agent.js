@@ -16,12 +16,39 @@ let socket = null;
 let currentConfig = null;
 let hardwareInfo = null;
 
+const jobQueue = [];
+let isProcessingQueue = false;
+
 function execAsync(command, options = {}) {
   return new Promise((resolve) => {
     exec(command, options, (error, stdout, stderr) => {
       resolve({ error, stdout: stdout ? stdout.trim() : '', stderr });
     });
   });
+}
+
+function enqueuePrintJob(jobData) {
+  if (!jobData || !jobData.jobId) return;
+  console.log(`[Queue] Received job #${jobData.jobId}. Adding to queue (Total queued: ${jobQueue.length + 1})...`);
+  jobQueue.push(jobData);
+  processNextJobInQueue();
+}
+
+async function processNextJobInQueue() {
+  if (isProcessingQueue) return;
+  if (jobQueue.length === 0) return;
+
+  isProcessingQueue = true;
+  const currentJob = jobQueue.shift();
+
+  try {
+    await processPrintJob(currentJob);
+  } catch (err) {
+    console.error(`[Queue Processing Error] Job #${currentJob.jobId}:`, err.message);
+  } finally {
+    isProcessingQueue = false;
+    setTimeout(processNextJobInQueue, 300);
+  }
 }
 
 async function processPrintJob(jobData) {
@@ -91,52 +118,28 @@ async function processPrintJob(jobData) {
 
     if (physicalPrinters.length === 0) {
       // ======================================================
-      // NO PHYSICAL PRINTER CONNECTED → Save PDF to Laptop
+      // NO PHYSICAL PRINTER CONNECTED → Instant Save to Laptop
       // ======================================================
-      console.log(`[Printer Auto-Detect] No physical printer connected. Showing Save File Popup...`);
+      console.log(`[Printer Auto-Detect] No physical printer connected. Auto-saving PDF to Laptop...`);
 
       const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
       const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
-      const dialogScript = path.join(__dirname, '..', 'save_dialog.ps1');
-
-      let savedPath = null;
-
-      // 1. Non-blocking interactive Save File Dialog popup using asynchronous execAsync
-      const resultFile = path.join(os.tmpdir(), `save_path_${Date.now()}.txt`);
-      try {
-        if (fs.existsSync(resultFile)) fs.unlinkSync(resultFile);
-        const cmd = `cmd /c start /wait powershell -ExecutionPolicy Bypass -File "${dialogScript}" -FileName "${suggestedName}" -OutFile "${resultFile}"`;
-        
-        await execAsync(cmd, { timeout: 45000 });
-
-        if (fs.existsSync(resultFile)) {
-          const chosen = fs.readFileSync(resultFile, 'utf8').trim();
-          fs.unlinkSync(resultFile);
-          if (chosen && chosen !== 'CANCELLED' && chosen.length > 3) {
-            savedPath = chosen;
-          }
-        }
-      } catch (dialogErr) {
-        console.warn('[Save Dialog Warning]:', dialogErr.message);
+      const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
+      
+      if (!fs.existsSync(desktopJobsDir)) {
+        fs.mkdirSync(desktopJobsDir, { recursive: true });
       }
 
-      // 2. Fallback: Save directly to Desktop\AutoPrint_SavedJobs folder if cancelled or timed out
-      if (!savedPath) {
-        const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
-        if (!fs.existsSync(desktopJobsDir)) {
-          fs.mkdirSync(desktopJobsDir, { recursive: true });
-        }
-        savedPath = path.join(desktopJobsDir, suggestedName);
-      }
+      const savedPath = path.join(desktopJobsDir, suggestedName);
 
-      // 3. Save trimmed PDF file
+      // Save trimmed PDF file directly to Desktop\AutoPrint_SavedJobs
       fs.copyFileSync(tempFilePath, savedPath);
       console.log(`[PDF Saved] File saved to laptop: ${savedPath}`);
 
-      // 4. Auto-open File Explorer asynchronously without blocking
+      // Auto-open File Explorer highlighting the saved file
       execAsync(`explorer.exe /select,"${savedPath}"`).catch(() => {});
 
-      // 5. Report COMPLETED status to backend
+      // Report COMPLETED status to backend
       reportJobStatus(jobId, 'COMPLETED');
       showDesktopNotification('PDF Saved to Laptop! ✅', `Location: ${path.basename(savedPath)}`);
 
@@ -162,7 +165,7 @@ async function processPrintJob(jobData) {
   } catch (err) {
     console.error('[Job Execution Error]:', err.message);
 
-    // Fallback: Save to Desktop\AutoPrint_SavedJobs if physical print or dialog failed
+    // Fallback: Save to Desktop\AutoPrint_SavedJobs if physical print failed
     let savedFallback = false;
     try {
       if (fs.existsSync(tempFilePath)) {
@@ -229,7 +232,7 @@ function startPollingFallback() {
       });
 
       if (res.data.success && res.data.hasJob && res.data.job) {
-        await processPrintJob(res.data.job);
+        enqueuePrintJob(res.data.job);
       }
     } catch (err) {
       // silent polling catch
@@ -285,7 +288,7 @@ async function startAgentEngine(config) {
 
   socket.on('job:new_print', (data) => {
     console.log(`[Job Dispatch Event Received] Job ID: ${data.jobId}`);
-    processPrintJob(data);
+    enqueuePrintJob(data);
   });
 
   socket.on('disconnect', () => {
