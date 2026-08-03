@@ -79,41 +79,53 @@ async function processPrintJob(jobData) {
 
     if (physicalPrinters.length === 0) {
       // ======================================================
-      // NO PHYSICAL PRINTER CONNECTED → Show Save Dialog
+      // NO PHYSICAL PRINTER CONNECTED → Save PDF to Laptop
       // ======================================================
-      console.log(`[Printer Auto-Detect] No physical printer connected. Showing Save Dialog...`);
-      reportJobStatus(jobId, 'PRINTER_OFFLINE', 'No physical printer connected');
-      showDesktopNotification('Printer Nahi Mila!', 'PDF save karne ki location choose karein...');
+      console.log(`[Printer Auto-Detect] No physical printer connected. Saving PDF to Laptop...`);
 
       const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
       const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
       const dialogScript = path.join(__dirname, '..', 'save_dialog.ps1');
 
+      let savedPath = null;
+
+      // 1. Try interactive Save File Dialog popup
       try {
-        const savePath = execSync(
+        const dialogResult = execSync(
           `powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "${dialogScript}" -FileName "${suggestedName}"`,
-          { encoding: 'utf8', timeout: 120000 }
+          { encoding: 'utf8', timeout: 30000 }
         ).trim();
 
-        if (savePath && savePath !== 'CANCELLED' && savePath.length > 3) {
-          fs.copyFileSync(tempFilePath, savePath);
-          console.log(`[PDF Saved] User selected: ${savePath}`);
-          showDesktopNotification('PDF Save Ho Gayi! ✅', `Saved: ${path.basename(savePath)}`);
-          reportJobStatus(jobId, 'COMPLETED');
-        } else {
-          console.log(`[PDF Save] User cancelled.`);
-          showDesktopNotification('PDF Save Cancel Hua', 'Aapne save dialog cancel kar diya.');
+        if (dialogResult && dialogResult !== 'CANCELLED' && dialogResult.length > 3) {
+          savedPath = dialogResult;
         }
       } catch (dialogErr) {
-        console.warn('[Save Dialog Error]:', dialogErr.message);
-        // Fallback: auto-save to Desktop
-        const fallbackPath = path.join(os.homedir(), 'Desktop', suggestedName);
-        if (fs.existsSync(tempFilePath)) {
-          fs.copyFileSync(tempFilePath, fallbackPath);
-          showDesktopNotification('PDF Desktop Pe Saved!', suggestedName);
-          reportJobStatus(jobId, 'COMPLETED');
-        }
+        console.warn('[Save Dialog Warning]:', dialogErr.message);
       }
+
+      // 2. Fallback: Save directly to Desktop\AutoPrint_SavedJobs folder
+      if (!savedPath) {
+        const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
+        if (!fs.existsSync(desktopJobsDir)) {
+          fs.mkdirSync(desktopJobsDir, { recursive: true });
+        }
+        savedPath = path.join(desktopJobsDir, suggestedName);
+      }
+
+      // 3. Save trimmed PDF file
+      fs.copyFileSync(tempFilePath, savedPath);
+      console.log(`[PDF Saved] File saved to laptop: ${savedPath}`);
+
+      // 4. Auto-open File Explorer highlighting the saved PDF
+      try {
+        execSync(`explorer.exe /select,"${savedPath}"`);
+      } catch (expErr) {
+        // silent
+      }
+
+      // 5. Report COMPLETED status to backend
+      reportJobStatus(jobId, 'COMPLETED');
+      showDesktopNotification('PDF Saved to Laptop! ✅', `Location: ${path.basename(savedPath)}`);
 
     } else {
       // ======================================================
