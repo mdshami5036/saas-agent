@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
 const { loadConfig, saveConfig } = require('./configManager');
 const { getHardwareFingerprint } = require('./hardwareFingerprint');
 const { enableAutoStart } = require('./autoStartService');
@@ -15,6 +15,14 @@ const { extractSelectedPages } = require('./pdfSlicer');
 let socket = null;
 let currentConfig = null;
 let hardwareInfo = null;
+
+function execAsync(command, options = {}) {
+  return new Promise((resolve) => {
+    exec(command, options, (error, stdout, stderr) => {
+      resolve({ error, stdout: stdout ? stdout.trim() : '', stderr });
+    });
+  });
+}
 
 async function processPrintJob(jobData) {
   const { jobId, downloadUrl, pdfUrl, pdfBase64, pagesToPrint, copies, colorMode, customerName, paymentStatus } = jobData;
@@ -93,12 +101,13 @@ async function processPrintJob(jobData) {
 
       let savedPath = null;
 
-      // 1. Force visible interactive Save File Dialog popup using cmd /c start
+      // 1. Non-blocking interactive Save File Dialog popup using asynchronous execAsync
       const resultFile = path.join(os.tmpdir(), `save_path_${Date.now()}.txt`);
       try {
         if (fs.existsSync(resultFile)) fs.unlinkSync(resultFile);
         const cmd = `cmd /c start /wait powershell -ExecutionPolicy Bypass -File "${dialogScript}" -FileName "${suggestedName}" -OutFile "${resultFile}"`;
-        execSync(cmd, { timeout: 60000 });
+        
+        await execAsync(cmd, { timeout: 45000 });
 
         if (fs.existsSync(resultFile)) {
           const chosen = fs.readFileSync(resultFile, 'utf8').trim();
@@ -111,7 +120,7 @@ async function processPrintJob(jobData) {
         console.warn('[Save Dialog Warning]:', dialogErr.message);
       }
 
-      // 2. Fallback: Save directly to Desktop\AutoPrint_SavedJobs folder
+      // 2. Fallback: Save directly to Desktop\AutoPrint_SavedJobs folder if cancelled or timed out
       if (!savedPath) {
         const desktopJobsDir = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs');
         if (!fs.existsSync(desktopJobsDir)) {
@@ -124,12 +133,8 @@ async function processPrintJob(jobData) {
       fs.copyFileSync(tempFilePath, savedPath);
       console.log(`[PDF Saved] File saved to laptop: ${savedPath}`);
 
-      // 4. Auto-open File Explorer highlighting the saved PDF
-      try {
-        execSync(`explorer.exe /select,"${savedPath}"`);
-      } catch (expErr) {
-        // silent
-      }
+      // 4. Auto-open File Explorer asynchronously without blocking
+      execAsync(`explorer.exe /select,"${savedPath}"`).catch(() => {});
 
       // 5. Report COMPLETED status to backend
       reportJobStatus(jobId, 'COMPLETED');
@@ -161,48 +166,21 @@ async function processPrintJob(jobData) {
     const statusToReport = isOffline ? 'PRINTER_OFFLINE' : 'FAILED';
     reportJobStatus(jobId, statusToReport, err.message);
 
-    // === WINDOWS SAVE DIALOG POPUP ===
-    // Printer nahi mila → User se puchho PDF kahan save karein
-    if (fs.existsSync(tempFilePath)) {
-      try {
-        const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
-        const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
-        const dialogScript = path.join(__dirname, '..', 'save_dialog.ps1');
-
-        console.log(`[Save Dialog] Printer not found. Showing save dialog to user...`);
-        showDesktopNotification('Printer Nahi Mila!', 'Popup aya hai - PDF save karne ki location choose karein');
-
-        // Run PowerShell Save File Dialog and get user chosen path
-        const savePath = execSync(
-          `powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "${dialogScript}" -FileName "${suggestedName}" -CustomerName "${safeCustomer}" -JobId "${jobId}"`,
-          { encoding: 'utf8', timeout: 120000 }
-        ).trim();
-
-        if (savePath && savePath !== 'CANCELLED' && savePath.length > 0) {
-          fs.copyFileSync(tempFilePath, savePath);
-          console.log(`[PDF Saved] User selected path: ${savePath}`);
-          showDesktopNotification('PDF Save Ho Gayi! ✅', `Saved: ${path.basename(savePath)}`);
-          reportJobStatus(jobId, 'COMPLETED');
-        } else {
-          console.log(`[PDF Save] User cancelled the save dialog.`);
-          showDesktopNotification('PDF Save Cancel', 'Aapne save dialog cancel kar diya.');
-        }
-      } catch (dialogErr) {
-        console.warn('[Save Dialog Error]:', dialogErr.message);
-        // Fallback: auto-save to Desktop
-        try {
-          const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
-          const fallbackPath = path.join(os.homedir(), 'Desktop', `PrintJob_${safeCustomer}_${jobId.substring(0,8)}.pdf`);
-          fs.copyFileSync(tempFilePath, fallbackPath);
-          console.log(`[PDF Fallback] Saved to Desktop: ${fallbackPath}`);
-          showDesktopNotification('PDF Desktop Pe Saved!', `PrintJob_${safeCustomer}_${jobId.substring(0,8)}.pdf`);
-        } catch (fbErr) {
-          console.error('[PDF Fallback Error]:', fbErr.message);
-        }
+    // Fallback: Save to Desktop\AutoPrint_SavedJobs if job processing failed midway
+    try {
+      const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
+      const fallbackPath = path.join(os.homedir(), 'Desktop', 'AutoPrint_SavedJobs', `PrintJob_${safeCustomer}_${jobId.substring(0,8)}.pdf`);
+      if (fs.existsSync(tempFilePath)) {
+        const fallbackDir = path.dirname(fallbackPath);
+        if (!fs.existsSync(fallbackDir)) fs.mkdirSync(fallbackDir, { recursive: true });
+        fs.copyFileSync(tempFilePath, fallbackPath);
+        showDesktopNotification('PDF Saved to Desktop!', `Saved at: ${path.basename(fallbackPath)}`);
+        reportJobStatus(jobId, 'COMPLETED');
       }
+    } catch (fbErr) {
+      console.error('[PDF Fallback Error]:', fbErr.message);
     }
   } finally {
-    // Delete temp PDF immediately
     if (fs.existsSync(tempFilePath)) {
       fs.unlink(tempFilePath, (unlinkErr) => {
         if (!unlinkErr) console.log(`[Cleanup] Local temp PDF deleted: ${tempFilePath}`);
