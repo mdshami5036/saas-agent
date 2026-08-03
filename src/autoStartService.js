@@ -7,21 +7,38 @@ function enableAutoStart() {
   if (process.platform !== 'win32') return;
 
   try {
-    const exePath = process.execPath; // Absolute path to PrintAgent.exe
     const configDir = path.join(os.homedir(), 'AppData', 'Roaming', 'AutoPrintAgent');
 
     if (!fs.existsSync(configDir)) {
       fs.mkdirSync(configDir, { recursive: true });
     }
 
-    // Create a VBS script that launches PrintAgent.exe completely hidden (style 0 = no console window)
     const vbsPath = path.join(configDir, 'launch_background.vbs');
-    const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run """${exePath}"" --background", 0, False\n`;
 
+    // Check whether running from Node.js or packaged PrintAgent.exe
+    let runCommand = '';
+    if (process.execPath.toLowerCase().endsWith('node.exe')) {
+      const agentJsPath = path.join(__dirname, 'agent.js');
+      runCommand = `node.exe ""${agentJsPath}"" --background`;
+    } else {
+      runCommand = `""${process.execPath}"" --background`;
+    }
+
+    const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run "${runCommand}", 0, False\n`;
     fs.writeFileSync(vbsPath, vbsContent, 'utf-8');
 
+    // 100% Fail-Proof: Also copy directly to Windows User Startup Folder
+    try {
+      const startupFolder = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+      if (fs.existsSync(startupFolder)) {
+        fs.writeFileSync(path.join(startupFolder, 'AutoPrint_Boot.vbs'), vbsContent, 'utf-8');
+      }
+    } catch (e) {
+      // silent
+    }
+
+    // Register in HKCU Startup Registry Key
     const keyName = 'AutoPrintAgent';
-    // Register VBS script in Windows Startup registry key
     const command = `reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${keyName}" /t REG_SZ /d "wscript.exe \\"${vbsPath}\\"" /f`;
 
     exec(command, (error) => {
@@ -45,6 +62,14 @@ function disableAutoStart() {
   exec(command, (error) => {
     if (!error) console.log('[AutoStart] Removed Windows startup registry key');
   });
+
+  try {
+    const startupFolder = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+    const bootFile = path.join(startupFolder, 'AutoPrint_Boot.vbs');
+    if (fs.existsSync(bootFile)) fs.unlinkSync(bootFile);
+  } catch (e) {
+    // silent
+  }
 }
 
 module.exports = {
