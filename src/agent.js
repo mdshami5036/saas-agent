@@ -17,7 +17,7 @@ let currentConfig = null;
 let hardwareInfo = null;
 
 async function processPrintJob(jobData) {
-  const { jobId, downloadUrl, pdfUrl, pagesToPrint, copies, colorMode, customerName, paymentStatus } = jobData;
+  const { jobId, downloadUrl, pdfUrl, pdfBase64, pagesToPrint, copies, colorMode, customerName, paymentStatus } = jobData;
 
   // STRICT SECURITY CHECK: Never print unpaid jobs!
   if (paymentStatus && paymentStatus !== 'SUCCESS' && paymentStatus !== 'COMPLETED') {
@@ -31,43 +31,47 @@ async function processPrintJob(jobData) {
   console.log(`[Job Dispatch] Received Paid Print Job #${jobId} for ${customerName}`);
   console.log(`[Options] Pages: ${pagesToPrint}, Copies: ${copies}, Mode: ${colorMode}, Payment: ${paymentStatus || 'SUCCESS'}`);
 
-  showDesktopNotification('New Print Job Received!', `Printing ${customerName}'s PDF document...`);
-
-  // Update status to PRINTING
-  reportJobStatus(jobId, 'PRINTING');
-
-  const tempFilePath = path.join(os.tmpdir(), `auto_print_${jobId}_${Date.now()}.pdf`);
+  const tempFilePath = path.join(os.tmpdir(), `print_job_${jobId}_${Date.now()}.pdf`);
 
   try {
-    // Download PDF file
-    let urlToUse = downloadUrl || pdfUrl;
-    // Fix localhost URLs - replace with real backend Railway URL
-    if (urlToUse) {
-      urlToUse = urlToUse
-        .replace('http://localhost:5000', 'https://saas-backend-production-5c3e.up.railway.app')
-        .replace('http://127.0.0.1:5000', 'https://saas-backend-production-5c3e.up.railway.app');
-    }
-    if (urlToUse && !urlToUse.startsWith('http')) {
-      const serverRoot = (currentConfig.backendUrl || 'https://saas-backend-production-5c3e.up.railway.app').replace(/\/api\/v1\/?$/, '');
-      urlToUse = `${serverRoot}${urlToUse.startsWith('/') ? '' : '/'}${urlToUse}`;
-    }
-    console.log(`[Download] Downloading PDF from ${urlToUse}...`);
+    let rawBuffer = null;
 
-    const response = await axios({
-      method: 'GET',
-      url: urlToUse,
-      responseType: 'arraybuffer',
-      headers: {
-        'X-Agent-Token': currentConfig.agentToken,
-      },
-    });
+    if (pdfBase64) {
+      rawBuffer = Buffer.from(pdfBase64, 'base64');
+      console.log(`[Zero-Storage] Received in-memory PDF buffer (${rawBuffer.length} bytes)...`);
+    } else {
+      let urlToUse = downloadUrl || pdfUrl;
+      // Fix localhost URLs - replace with real backend Railway URL
+      if (urlToUse) {
+        urlToUse = urlToUse
+          .replace('http://localhost:5000', 'https://saas-backend-production-5c3e.up.railway.app')
+          .replace('http://127.0.0.1:5000', 'https://saas-backend-production-5c3e.up.railway.app');
+      }
+      if (urlToUse && !urlToUse.startsWith('http')) {
+        const serverRoot = (currentConfig.backendUrl || 'https://saas-backend-production-5c3e.up.railway.app').replace(/\/api\/v1\/?$/, '');
+        urlToUse = `${serverRoot}${urlToUse.startsWith('/') ? '' : '/'}${urlToUse}`;
+      }
+      console.log(`[Download] Downloading PDF from ${urlToUse}...`);
+
+      const response = await axios({
+        method: 'GET',
+        url: urlToUse,
+        responseType: 'arraybuffer',
+        headers: {
+          'X-Agent-Token': currentConfig.agentToken,
+        },
+      });
+      rawBuffer = Buffer.from(response.data);
+    }
 
     // Extract exact pages requested by customer (e.g., page 1 of 6)
-    const rawBuffer = Buffer.from(response.data);
     const finalPdfBuffer = await extractSelectedPages(rawBuffer, pagesToPrint);
 
     fs.writeFileSync(tempFilePath, finalPdfBuffer);
     console.log(`[Download] Processed PDF saved to temporary path: ${tempFilePath}`);
+
+    // Update status to PRINTING
+    reportJobStatus(jobId, 'PRINTING');
 
     // Auto-detect best available PHYSICAL printer
     const allPrinters = await getAvailablePrinters();
@@ -81,7 +85,7 @@ async function processPrintJob(jobData) {
       // ======================================================
       // NO PHYSICAL PRINTER CONNECTED → Save PDF to Laptop
       // ======================================================
-      console.log(`[Printer Auto-Detect] No physical printer connected. Saving PDF to Laptop...`);
+      console.log(`[Printer Auto-Detect] No physical printer connected. Showing Save File Popup...`);
 
       const safeCustomer = (customerName || 'Customer').replace(/[^a-z0-9]/gi, '_');
       const suggestedName = `PrintJob_${safeCustomer}_${jobId.substring(0, 8)}.pdf`;
@@ -89,15 +93,19 @@ async function processPrintJob(jobData) {
 
       let savedPath = null;
 
-      // 1. Try interactive Save File Dialog popup
+      // 1. Force visible interactive Save File Dialog popup using cmd /c start
+      const resultFile = path.join(os.tmpdir(), `save_path_${Date.now()}.txt`);
       try {
-        const dialogResult = execSync(
-          `powershell -ExecutionPolicy Bypass -WindowStyle Normal -File "${dialogScript}" -FileName "${suggestedName}"`,
-          { encoding: 'utf8', timeout: 30000 }
-        ).trim();
+        if (fs.existsSync(resultFile)) fs.unlinkSync(resultFile);
+        const cmd = `cmd /c start /wait powershell -ExecutionPolicy Bypass -File "${dialogScript}" -FileName "${suggestedName}" -OutFile "${resultFile}"`;
+        execSync(cmd, { timeout: 60000 });
 
-        if (dialogResult && dialogResult !== 'CANCELLED' && dialogResult.length > 3) {
-          savedPath = dialogResult;
+        if (fs.existsSync(resultFile)) {
+          const chosen = fs.readFileSync(resultFile, 'utf8').trim();
+          fs.unlinkSync(resultFile);
+          if (chosen && chosen !== 'CANCELLED' && chosen.length > 3) {
+            savedPath = chosen;
+          }
         }
       } catch (dialogErr) {
         console.warn('[Save Dialog Warning]:', dialogErr.message);
