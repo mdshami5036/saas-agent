@@ -277,24 +277,10 @@ async function startAgentEngine(config) {
       printers,
       selectedPrinter: config.selectedPrinter,
     });
-
-    // Auto-close terminal window and hand over to background hidden process
-    const isBackgroundRun = process.argv.includes('--background') || process.argv.includes('--silent');
-    if (!isBackgroundRun && process.platform === 'win32') {
-      try {
-        const exePath = process.execPath;
-        const cmd = `powershell -Command "Start-Process '${exePath}' -WindowStyle Hidden -ArgumentList '--background'"`;
-        require('child_process').exec(cmd);
-        setTimeout(() => {
-          process.exit(0);
-        }, 500);
-      } catch (e) {
-        // Fallback
-      }
-    }
   });
 
   socket.on('job:new_print', (data) => {
+    console.log(`[Job Dispatch Event Received] Job ID: ${data.jobId}`);
     processPrintJob(data);
   });
 
@@ -323,26 +309,7 @@ async function startAgentEngine(config) {
 
 function init() {
   const config = loadConfig();
-
   const isForceConfig = process.argv.includes('--configure');
-  const isBackgroundRun = process.argv.includes('--background') || process.argv.includes('--silent');
-
-  // If launched via double-click or CLI without background flag, instantly detach into hidden wscript background process
-  if (!isBackgroundRun && !isForceConfig && process.platform === 'win32') {
-    try {
-      const exePath = process.execPath;
-      const configDir = path.join(require('os').homedir(), 'AppData', 'Roaming', 'AutoPrintAgent');
-      if (!fs.existsSync(configDir)) fs.mkdirSync(configDir, { recursive: true });
-      const vbsPath = path.join(configDir, 'launch_hidden.vbs');
-      const vbsContent = `Set WshShell = CreateObject("WScript.Shell")\nWshShell.Run """${exePath}"" --background", 0, False\n`;
-      fs.writeFileSync(vbsPath, vbsContent, 'utf-8');
-      
-      require('child_process').exec(`wscript.exe "${vbsPath}"`);
-      process.exit(0);
-    } catch (e) {
-      // Fallback if spawn fails
-    }
-  }
 
   if (isForceConfig || !config.isConfigured || !config.agentToken) {
     console.log('[Setup] Launching configuration GUI window...');
